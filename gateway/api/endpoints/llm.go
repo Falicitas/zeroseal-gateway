@@ -17,6 +17,18 @@ import (
 	"github.com/zeroseal/shared/catalog"
 )
 
+// upstreamUnreachable 是上游连不上时回给客户端的话。
+//
+// 原来这里直接回 err.Error()，里面是 DNS 失败、拨号超时、上游 URL 这些
+// 内部细节。现在原文改走 diag 的 ring（经 SetInternal 由 HTTPErrorHandler
+// 取走），只有管理员读得到；客户端拿到的是这句固定短语。
+//
+// 🤔：SetInternal 就是给 ring 看的，ring 通过 newHTTPEvent 的 he.Internal 取到了 err
+//
+// 注意只脱敏这一类：上游自己返的非 2xx 响应体照旧原样透传（c.Blob），
+// 那是 OpenAI 兼容的客户端 SDK 要按格式解析的东西。
+const upstreamUnreachable = "上游暂时不可达"
+
 const ctxAccountKey = "zeroseal.account" // 随便一个，避免之后和别的 c 的 ctx 重了
 
 // LLM 持有 llm handler 的依赖。providerKeys 转发用，pool 鉴权和下一步计费用。
@@ -255,7 +267,7 @@ func (h *LLM) nonStreamCompletion(c echo.Context, cl call) error {
 	resp, err := llm.Forward(upCtx, cl.adapter, cl.provider, cl.key, cl.body)
 	if err != nil {
 		_ = billing.Refund(context.Background(), h.pool, cl.recordID)
-		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+		return echo.NewHTTPError(http.StatusBadGateway, upstreamUnreachable).SetInternal(err)
 	}
 	// 上游返回非 2xx 也退款（用户不该为上游错误付费）。
 	if resp.Status < 200 || resp.Status >= 300 {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zeroseal/gateway/services/diag"
 	"github.com/zeroseal/shared/catalog"
 )
 
@@ -234,12 +235,14 @@ func ForwardSpeech(
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		diag.RecordUpstream(req.URL.Host, 0, err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errBody, _ := io.ReadAll(resp.Body)
+		diag.RecordUpstream(req.URL.Host, resp.StatusCode, "")
 		return nil, &UpstreamError{Status: resp.StatusCode, Body: errBody}
 	}
 
@@ -279,6 +282,7 @@ func ForwardSpeech(
 		flush()
 	}
 	if err := sc.Err(); err != nil {
+		diag.RecordUpstream(req.URL.Host, resp.StatusCode, err.Error())
 		return result, err
 	}
 	return result, nil

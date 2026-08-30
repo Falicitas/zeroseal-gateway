@@ -91,7 +91,7 @@ func (h *LLM) createVideo(c echo.Context) error {
 	resp, err := llm.SubmitVideo(upCtx, adapter, p, key, body)
 	if err != nil {
 		_ = billing.Refund(context.Background(), h.pool, recordID)
-		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+		return echo.NewHTTPError(http.StatusBadGateway, upstreamUnreachable).SetInternal(err)
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
 		_ = billing.Refund(context.Background(), h.pool, recordID)
@@ -167,7 +167,7 @@ func (h *LLM) getVideo(c echo.Context) error {
 	resp, err := llm.PollVideo(upCtx, adapter, p, key, t.UpstreamID)
 	if err != nil {
 		// 查不到不动账：任务还在上游那儿，客户下次再来，或者 worker 兜底。
-		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+		return echo.NewHTTPError(http.StatusBadGateway, upstreamUnreachable).SetInternal(err)
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
 		return c.Blob(resp.Status, resp.ContentType, resp.Body)

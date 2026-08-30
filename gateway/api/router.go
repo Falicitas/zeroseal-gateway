@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/zeroseal/gateway/api/endpoints"
 	"github.com/zeroseal/gateway/services/attestation"
+	"github.com/zeroseal/gateway/services/diag"
 )
 
 // NewRouter 建实例、划版本组，具体路由由 endpoints 各文件注册。
@@ -18,10 +19,23 @@ func NewRouter(providerKeys map[string]string, pool *pgxpool.Pool, col *attestat
 	e.HideBanner = true
 	e.HidePort = true
 
+	// echo 层的两个采集点，业务代码一行不改。
+	//
+	// HTTPErrorHandler 接住 api/endpoints 里全部 72 处 echo.NewHTTPError
+	// （echo 自己的默认实现不打日志，那些错误今天完全静默）；
+	// Logger 接住 17 处 c.Logger().Errorf 的计费收尾失败；
+	// Recover 接住 panic 的栈（现在没装，栈只进 stderr，摘 sshd 后就没了）。
+	//
+	// 第三个采集点是上游失败，在 services/llm 里直接调 diag.RecordUpstream。
+	e.HTTPErrorHandler = diag.HTTPErrorHandler(e.DefaultHTTPErrorHandler)
+	e.Logger = diag.Logger(e.Logger)
+	e.Use(diag.Recover())
+
 	v1 := e.Group("/v1")
 
 	endpoints.NewLLM(providerKeys, pool).Register(v1)
 	endpoints.NewAttestation(col).Register(v1)
+	endpoints.NewDiag().Register(v1)
 
 	return e
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/zeroseal/gateway/api"
 	"github.com/zeroseal/gateway/services/attestation"
+	"github.com/zeroseal/gateway/services/diag"
 	"github.com/zeroseal/gateway/services/secret"
 	"github.com/zeroseal/gateway/services/video"
 	"github.com/zeroseal/shared/db"
@@ -81,6 +82,9 @@ func main() {
 			MinVersion:   tls.VersionTLS13,
 		}
 	}
+
+	// 在起监听的 goroutine 之前打点：先写后读，handler 读到的一定是已写入的值。
+	diag.MarkServing()
 
 	go func() {
 		var err error

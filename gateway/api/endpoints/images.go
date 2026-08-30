@@ -96,7 +96,7 @@ func (h *LLM) imageGenerations(c echo.Context) error {
 	resp, err := llm.ForwardImage(upCtx, adapter, p, key, body)
 	if err != nil {
 		_ = billing.Refund(context.Background(), h.pool, recordID)
-		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+		return echo.NewHTTPError(http.StatusBadGateway, upstreamUnreachable).SetInternal(err)
 	}
 	// 上游非 2xx 退款（用户不该为上游错误付费）。
 	if resp.Status < 200 || resp.Status >= 300 {

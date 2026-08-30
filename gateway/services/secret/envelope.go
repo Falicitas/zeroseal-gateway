@@ -111,44 +111,44 @@ func SealEnvelope(plain, tdPub []byte, adminPriv ed25519.PrivateKey) (*Envelope,
 	}, nil
 }
 
-// OpenEnvelope 验签、解密，返回明文载荷。
+// 🤔：OpenEnvelope 对 inject 进来的信息进行验签、解密，返回明文载荷。
 // 先验签再解密：签名不对的请求在做 ECDH 之前就拒掉，
 // 注入端点对未授权方就只是个消耗一次 Ed25519 验证的空壳。
 func OpenEnvelope(env *Envelope, tdPriv *ecdh.PrivateKey, adminPub ed25519.PublicKey) ([]byte, error) {
 	tdPub := tdPriv.PublicKey().Bytes()
 
 	if len(env.SenderPub) != 32 {
-		return nil, errors.New("secret: sender_pub 长度不对")
+		return nil, &injectCodedError{code: ErrCodeEnvelopeMalformed, msg: "secret: sender_pub 长度不对"}
 	}
 	if len(env.Nonce) != nonceLen {
-		return nil, errors.New("secret: nonce 长度不对")
+		return nil, &injectCodedError{code: ErrCodeEnvelopeMalformed, msg: "secret: nonce 长度不对"}
 	}
 	if len(env.Sig) != ed25519.SignatureSize {
-		return nil, errors.New("secret: sig 长度不对")
+		return nil, &injectCodedError{code: ErrCodeEnvelopeMalformed, msg: "secret: sig 长度不对"}
 	}
 	if len(env.Ciphertext) == 0 {
-		return nil, errors.New("secret: ciphertext 为空")
+		return nil, &injectCodedError{code: ErrCodeEnvelopeMalformed, msg: "secret: ciphertext 为空"}
 	}
 
 	if !ed25519.Verify(adminPub, sigMessage(tdPub, env.SenderPub, env.Nonce, env.Ciphertext), env.Sig) {
-		return nil, errors.New("secret: 签名校验失败")
+		return nil, &injectCodedError{code: ErrCodeSigInvalid, msg: "secret: 签名校验失败"}
 	}
 
 	senderKey, err := ecdh.X25519().NewPublicKey(env.SenderPub)
 	if err != nil {
-		return nil, fmt.Errorf("secret: sender_pub 无效: %w", err)
+		return nil, &injectCodedError{ErrCodeEnvelopeMalformed, "secret: sender_pub 无效", err}
 	}
 	shared, err := tdPriv.ECDH(senderKey)
 	if err != nil {
-		return nil, fmt.Errorf("secret: ECDH: %w", err)
+		return nil, &injectCodedError{ErrCodeDecryptFailed, "secret: ECDH 失败", err}
 	}
 	aead, err := aeadFor(shared, tdPub, env.SenderPub)
 	if err != nil {
-		return nil, err
+		return nil, &injectCodedError{ErrCodeDecryptFailed, "secret: 派生 AEAD 失败", err}
 	}
 	plain, err := aead.Open(nil, env.Nonce, env.Ciphertext, tdPub)
 	if err != nil {
-		return nil, fmt.Errorf("secret: 解密失败: %w", err)
+		return nil, &injectCodedError{ErrCodeDecryptFailed, "secret: 解密失败", err}
 	}
 	return plain, nil
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zeroseal/gateway/services/diag"
 	"github.com/zeroseal/shared/catalog"
 )
 
@@ -65,13 +66,20 @@ func buildRequest(ctx context.Context, r requester, p catalog.Provider, key stri
 func readAll(client *http.Client, req *http.Request) (*Response, error) {
 	resp, err := client.Do(req)
 	if err != nil {
+		diag.RecordUpstream(req.URL.Host, 0, err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close() // 应用层的资源归还（把这次响应占用的那条底层 TCP 连接的控制权还给 Transport，让它决定复用还是关闭。），并非 TCP 层的关连接
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		diag.RecordUpstream(req.URL.Host, resp.StatusCode, err.Error())
 		return nil, err
+	}
+
+	// 非 2xx 只记状态码，不记 respBody：那是上游自己的 JSON，可能回显请求内容。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		diag.RecordUpstream(req.URL.Host, resp.StatusCode, "")
 	}
 
 	ct := resp.Header.Get("Content-Type")
@@ -139,6 +147,7 @@ func ForwardStream(
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		diag.RecordUpstream(req.URL.Host, 0, err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -146,6 +155,7 @@ func ForwardStream(
 	// 上游非 2xx：不是流，读满错误体返回，让 handler 决定退款。
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errBody, _ := io.ReadAll(resp.Body)
+		diag.RecordUpstream(req.URL.Host, resp.StatusCode, "")
 		return nil, &UpstreamError{Status: resp.StatusCode, Body: errBody}
 	}
 
@@ -176,6 +186,7 @@ func ForwardStream(
 	}
 	if err := sc.Err(); err != nil {
 		// 上游流中途断（读错误）。已扫到的 usage 可能为 nil。
+		diag.RecordUpstream(req.URL.Host, resp.StatusCode, err.Error())
 		return result, err
 	}
 	return result, nil

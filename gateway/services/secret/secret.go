@@ -45,25 +45,19 @@ type Secrets struct {
 // 跟 attestation 的判据（configfs 在不在）是两件独立的事——
 // TD 上跑 prod 路径拿机密，同时 attestation 因为有 configfs 而启用。
 func Load(ctx context.Context) (*Secrets, error) {
-	// collateral 只需要 configfs 和网络，不需要任何机密，所以排在注入之前。
-	// 排在后面的话，Intel 或 DNS 一出问题就 Fatal，会连带把已经注入的机密弄丢——
-	// 重启后临时密钥就换了，只能从头再注入一次。早失败的代价是零。
-	col, err := loadAttestation(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var s *Secrets
 	if os.Getenv("ZEROSEAL_DEV_MODE") == "1" {
-		s, err = loadFromEnv()
-	} else {
-		s, err = loadFromInjection(ctx)
+		col, err := loadAttestation(ctx)
+		if err != nil {
+			return nil, err
+		}
+		s, err := loadFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		s.Attestation = col
+		return s, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	s.Attestation = col
-	return s, nil
+	return loadFromInjection(ctx)
 }
 
 // upstreamKeyPrefix 是 dev 模式下上游 key 的环境变量前缀，后面接大写的
@@ -117,14 +111,42 @@ func providerKeysFromEnv() map[string]string {
 	return keys
 }
 
-// loadFromInjection 起注入监听并阻塞，拿到机密后组装成 Secrets。
+// loadFromInjection 起注入监听、拉 collateral、阻塞等注入，组装成 Secrets。
+//
+// 三步的顺序都有理由：
+//
+// 监听排第一，是为了让 /inject/status 在拉 collateral 的过程中就能答话。
+// 排在后面的话，Intel PCS 不通或 DNS 挂了的时候，从 Mac 上看到的只有
+// 「9443 连不上」，跟机器关着没有区别 —— 而摘掉 sshd 之后没有别的办法分辨。
+//
+// collateral 仍然排在等注入之前（这条没变）：排到后面去，Intel 或 DNS 一出问题
+// 就 Fatal，会连带把已经注入的机密弄丢 —— 重启后临时密钥就换了，只能从头再注入
+// 一次。早失败的代价是零。
 func loadFromInjection(ctx context.Context) (*Secrets, error) {
 	addr := os.Getenv("ZEROSEAL_INJECT_ADDR")
 	if addr == "" {
 		addr = defaultInjectAddr
 	}
 
-	p, err := awaitInjection(ctx, addr)
+	inj, err := newInjector()
+	if err != nil {
+		return nil, err
+	}
+
+	srv, errCh := inj.serve9443(addr)
+	// 任何提前返回都把监听收掉。正常路径在 wait 里已经 Shutdown 过，
+	// 对同一个 Server 再 Close 是安全的。
+	defer srv.Close()
+
+	col, err := loadAttestation(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	inj.status.set(StateAwaitingInjection)
+	log.Print("secret: 等待机密注入")
+
+	p, err := inj.wait(ctx, srv, errCh)
 	if err != nil {
 		return nil, err
 	}
@@ -139,9 +161,12 @@ func loadFromInjection(ctx context.Context) (*Secrets, error) {
 		ProviderKeys: p.ProviderKeys,
 		DBDSN:        p.DBDSN,
 		TLSCert:      &cert,
+		Attestation:  col,
 	}, nil
 }
 
+// 🤔：获取 Collateral 后，唯一的消费者是 443 的 /v1/attestation，TD 拉好、缓存着、随 quote 一起发给用户
+// 🤔：而 inject 阶段，是管理员在 zsinject 时自己去 intel 那边拉 Collateral 的
 // loadAttestation 在 TDX 环境下同步解 FMSPC 并拉第一份 collateral，
 // 拉不到就 fail-fast。非 TDX 环境不是错误，降级成「不启用 attestation」。
 //
