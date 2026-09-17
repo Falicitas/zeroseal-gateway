@@ -14,9 +14,10 @@ import (
 // 不区分「key 不存在」和「用户已删」，避免向调用方泄露原因。
 var ErrUnauthorized = errors.New("unauthorized")
 
-// Account 是鉴权查出的账户快照。balance 这一步用不上，
-// 下一步计费直接用，一次查回省得改 SQL。
+// Account 是鉴权时的账户快照。U 盘认领后 KeyID 不变，
+// UserID 和 Balance 可能变化，不能作为后续扣费时的最新状态。
 type Account struct {
+	KeyID   string
 	UserID  string
 	Balance int64
 }
@@ -29,13 +30,13 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, plainKey string) (Acc
 	sum := sha256.Sum256([]byte(plainKey))
 	keyHash := hex.EncodeToString(sum[:])
 	const q = `
-		SELECT u.id, u.balance
+		SELECT k.id, u.id, u.balance
 		FROM api_keys k
 		JOIN users u ON u.id = k.user_id
 		WHERE k.key_hash = $1 AND u.deleted_at IS NULL`
 
 	var acc Account
-	err := pool.QueryRow(ctx, q, keyHash).Scan(&acc.UserID, &acc.Balance)
+	err := pool.QueryRow(ctx, q, keyHash).Scan(&acc.KeyID, &acc.UserID, &acc.Balance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrUnauthorized
 	}

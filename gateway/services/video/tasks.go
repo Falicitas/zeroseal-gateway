@@ -41,26 +41,44 @@ type Task struct {
 
 // Create 落库。调用方必须在拿到上游任务 ID 之后、返回给客户之前调它 ——
 // 存不下就等于这个任务再也结算不了，那时应当退款。
+// 上游返回前可能已经完成认领，因此从计费记录读取当前账户，并持锁到任务落库。
+// 认领事务须先锁计费记录再迁移已有任务，保证晚到的任务不会留在影子账户。
 func Create(ctx context.Context, pool *pgxpool.Pool, t Task) error {
-	_, err := pool.Exec(ctx,
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := tx.QueryRow(ctx,
+		`SELECT user_id FROM billing_records WHERE id=$1 FOR UPDATE`, t.RecordID,
+	).Scan(&t.UserID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
 		`INSERT INTO video_tasks (upstream_id, user_id, model, provider, record_id, status, tier)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		t.UpstreamID, t.UserID, t.Model, t.Provider, t.RecordID, t.Status, t.Tier,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
-// Get 按任务 ID 取，归属校验写在查询条件里而不是留给调用方 —— 这样不可能忘。
-// user_id 对不上返回 ErrNotFound 而不是 403：不该让人靠状态码试探出别人的任务
-// 存不存在。
-func Get(ctx context.Context, pool *pgxpool.Pool, upstreamID, userID string) (Task, error) {
-	t := Task{UpstreamID: upstreamID, UserID: userID}
+// Get 按任务 ID 取，用 key 当前所属账户校验归属。
+// key 与任务在同一条查询中读取，避免混用认领前后的归属。
+// 归属不匹配统一返回 ErrNotFound，避免泄露别人的任务是否存在。
+func Get(ctx context.Context, pool *pgxpool.Pool, upstreamID, keyID string) (Task, error) {
+	t := Task{UpstreamID: upstreamID}
 	var settledAt *time.Time
 	err := pool.QueryRow(ctx,
-		`SELECT model, provider, record_id, status, tier, created_at, settled_at
-		 FROM video_tasks WHERE upstream_id = $1 AND user_id = $2`,
-		upstreamID, userID,
-	).Scan(&t.Model, &t.Provider, &t.RecordID, &t.Status, &t.Tier, &t.CreatedAt, &settledAt)
+		`SELECT v.user_id, v.model, v.provider, v.record_id, v.status, v.tier, v.created_at, v.settled_at
+		 FROM video_tasks v
+		 JOIN api_keys k ON k.user_id = v.user_id
+		 JOIN users u ON u.id = v.user_id
+		 WHERE v.upstream_id = $1 AND k.id = $2 AND u.deleted_at IS NULL`,
+		upstreamID, keyID,
+	).Scan(&t.UserID, &t.Model, &t.Provider, &t.RecordID, &t.Status, &t.Tier, &t.CreatedAt, &settledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}

@@ -13,6 +13,9 @@ import (
 // ErrInsufficient 余额不足，调用方返 402。
 var ErrInsufficient = errors.New("insufficient balance")
 
+// ErrUnauthorized 表示预扣前 key 已删除或所属账户已软删，调用方返 401。
+var ErrUnauthorized = errors.New("unauthorized")
+
 // EstimateHold 算预扣额（纳元）。
 // 输入部分保守按未命中价，token 数用 min(runeCount×1.2, ctxLimit)；
 // 输出部分按 maxToken × 输出价，maxToken 由调用方决定。
@@ -67,19 +70,34 @@ func SettleFull(ctx context.Context, pool *pgxpool.Pool, recordID string) error 
 	return nil
 }
 
-// Hold 预扣事务：行锁读余额 → 够则扣 → 写一条 held 记录。
-// 返回 recordID 供后续结算/退款定位。余额不足返回 ErrInsufficient。
-func Hold(ctx context.Context, pool *pgxpool.Pool, userID, model string, amount int64) (string, error) {
+// Hold 预扣事务：锁 key 并读取当前归属 → 锁账户读余额 → 扣款并写 held 记录。
+// key 锁持有到提交，认领迁移也锁同一行，避免鉴权后的账户变更导致扣错账户。
+// 返回 recordID 供后续结算/退款定位。
+func Hold(ctx context.Context, pool *pgxpool.Pool, keyID, model string, amount int64) (string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback(ctx) // 已 Commit 后 Rollback 是 no-op，安全兜底
 
+	var userID string
+	err = tx.QueryRow(ctx,
+		`SELECT user_id FROM api_keys WHERE id=$1 FOR UPDATE`, keyID,
+	).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUnauthorized
+	}
+	if err != nil {
+		return "", err
+	}
+
 	var balance int64
 	err = tx.QueryRow(ctx,
-		`SELECT balance FROM users WHERE id=$1 FOR UPDATE`, userID,
+		`SELECT balance FROM users WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, userID,
 	).Scan(&balance)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUnauthorized
+	}
 	if err != nil {
 		return "", err
 	}
@@ -96,9 +114,9 @@ func Hold(ctx context.Context, pool *pgxpool.Pool, userID, model string, amount 
 
 	var recordID string
 	if err = tx.QueryRow(ctx,
-		`INSERT INTO billing_records (user_id, model, hold_amount, status)
-		 VALUES ($1, $2, $3, 'held') RETURNING id`,
-		userID, model, amount,
+		`INSERT INTO billing_records (user_id, key_id, model, hold_amount, status)
+		 VALUES ($1, $2, $3, $4, 'held') RETURNING id`,
+		userID, keyID, model, amount,
 	).Scan(&recordID); err != nil {
 		return "", err
 	}

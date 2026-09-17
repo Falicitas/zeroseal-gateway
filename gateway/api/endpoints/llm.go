@@ -195,7 +195,10 @@ func (h *LLM) chatCompletions(c echo.Context) error {
 	runeCount := int64(len([]rune(string(body)))) // rune 不等于 int32。里面转为 rune[]，这个是解析 utf-8 字符用的
 	hold := billing.EstimateHold(pricing, m.CtxLimit, runeCount, maxToken)
 
-	recordID, err := billing.Hold(c.Request().Context(), h.pool, acc.UserID, m.ID, hold)
+	recordID, err := billing.Hold(c.Request().Context(), h.pool, acc.KeyID, m.ID, hold)
+	if errors.Is(err, billing.ErrUnauthorized) {
+		return echo.NewHTTPError(http.StatusUnauthorized, "凭据无效")
+	}
 	if errors.Is(err, billing.ErrInsufficient) {
 		return echo.NewHTTPError(http.StatusPaymentRequired, "余额不足")
 	}

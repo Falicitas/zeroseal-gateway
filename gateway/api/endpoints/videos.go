@@ -77,7 +77,10 @@ func (h *LLM) createVideo(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "model "+m.ID+" 缺定价")
 	}
 
-	recordID, err := billing.Hold(c.Request().Context(), h.pool, acc.UserID, m.ID, hold)
+	recordID, err := billing.Hold(c.Request().Context(), h.pool, acc.KeyID, m.ID, hold)
+	if errors.Is(err, billing.ErrUnauthorized) {
+		return echo.NewHTTPError(http.StatusUnauthorized, "凭据无效")
+	}
 	if errors.Is(err, billing.ErrInsufficient) {
 		return echo.NewHTTPError(http.StatusPaymentRequired, "余额不足")
 	}
@@ -109,7 +112,6 @@ func (h *LLM) createVideo(c echo.Context) error {
 
 	if err := video.Create(context.Background(), h.pool, video.Task{
 		UpstreamID: upstreamID,
-		UserID:     acc.UserID,
 		Model:      m.ID,
 		Provider:   p.Name,
 		RecordID:   recordID,
@@ -135,7 +137,7 @@ func (h *LLM) getVideo(c echo.Context) error {
 	}
 
 	// video.Get 里带了归属校验，别人的任务一律当不存在。
-	t, err := video.Get(c.Request().Context(), h.pool, c.Param("id"), acc.UserID)
+	t, err := video.Get(c.Request().Context(), h.pool, c.Param("id"), acc.KeyID)
 	if errors.Is(err, video.ErrNotFound) {
 		return echo.NewHTTPError(http.StatusNotFound, "任务不存在")
 	}

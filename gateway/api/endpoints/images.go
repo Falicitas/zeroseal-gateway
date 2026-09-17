@@ -72,7 +72,10 @@ func (h *LLM) imageGenerations(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "model "+m.ID+" 缺定价")
 	}
 
-	recordID, err := billing.Hold(c.Request().Context(), h.pool, acc.UserID, m.ID, hold)
+	recordID, err := billing.Hold(c.Request().Context(), h.pool, acc.KeyID, m.ID, hold)
+	if errors.Is(err, billing.ErrUnauthorized) {
+		return echo.NewHTTPError(http.StatusUnauthorized, "凭据无效")
+	}
 	if errors.Is(err, billing.ErrInsufficient) {
 		return echo.NewHTTPError(http.StatusPaymentRequired, "余额不足")
 	}
