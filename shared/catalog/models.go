@@ -1,25 +1,28 @@
 package catalog
 
-// 定价按各家 2026-08 官方刊例价填，一律取**非优惠价**：限时折扣会到期，
+// 定价取官方非优惠刊例价；DeepSeek、GLM、Kimi 于 2026-09-21 核对。
+// 限时折扣会到期，
 // 跟着调等于要盯日期改 catalog，而改 catalog = 改 TD 二进制 = 换度量值 = 重走注入。
 // 优惠跟踪是另一条线的事。
 //
 // 换算：X 元/百万 token = X×1000 纳元/token。
 var models = []Model{
-	// DeepSeek 两条走分时价（2026-08 起）：高峰为北京时间 9:00–12:00、
+	// DeepSeek 高峰为北京时间周一至周五（节假日除外）9:00–12:00、
 	// 14:00–18:00，空闲价是高峰价的一半。落档由 Provider.PriceOf 按请求发起
 	// 时刻算，adapter 不知情。
 	// 上下文 1M 但输出最长 384K，MaxOutput 单列，免得预扣按 1M 白占余额。
 	{
-		// 高峰 0.10 / 3.0 / 9.0，空闲 0.05 / 1.5 / 4.5（元/百万 token）。
-		ID: "deepseek-v4-flash", Surface: SurfaceChat, Owner: "deepseek",
+		// DeepSeek-V4.1-Flash，官方调用名为 deepseek-flash。
+		// 高峰 0.04 / 2 / 8，空闲 0.02 / 1 / 4（元/百万 token）。
+		// https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+		ID: "deepseek-flash", Surface: SurfaceChat, Owner: "deepseek",
 		CtxLimit: 1_000_000, MaxOutput: 384_000,
 		Providers: []Provider{{
-			Name: "deepseek", UpstreamID: "deepseek-v4-flash",
+			Name: "deepseek", UpstreamID: "deepseek-flash",
 			BaseURL: "https://api.deepseek.com/v1",
 			Pricing: map[string]Pricing{
-				TierPeak:    {InputHit: 100, Input: 3000, Output: 9000},
-				TierOffPeak: {InputHit: 50, Input: 1500, Output: 4500},
+				TierPeak:    {InputHit: 40, Input: 2000, Output: 8000},
+				TierOffPeak: {InputHit: 20, Input: 1000, Output: 4000},
 			},
 			TierAt: tierAtByDeepseek,
 		}},
@@ -39,25 +42,51 @@ var models = []Model{
 		}},
 	},
 	{
-		// ¥2 / ¥20 / ¥100 每百万 token。输出价是 deepseek-v4-pro 的 16.7 倍，
-		// 预扣时注意（见 endpoints.defaultMaxToken）。
+		// ¥2 / ¥20 / ¥100 每百万 token。缓存写入与未缓存输入互斥，
+		// 5 分钟写入价 ¥20，1 小时写入价 ¥40，不与输入价重复收取。
+		// https://platform.kimi.com/docs/pricing/chat
 		ID: "kimi-k3", Surface: SurfaceChat, Owner: "moonshot",
 		CtxLimit: 1_048_576,
 		Providers: []Provider{{
 			Name: "kimi", UpstreamID: "kimi-k3",
 			// 文档站已改叫 platform.kimi.com，但 API base 仍是 moonshot.cn（实测通）
 			BaseURL: "https://api.moonshot.cn/v1",
-			Pricing: map[string]Pricing{"": {InputHit: 2000, Input: 20000, Output: 100000}},
+			Pricing: map[string]Pricing{
+				TierDefault:      {InputHit: 2000, Input: 20000, Output: 100000},
+				TierCacheWrite5m: {Input: 20000},
+				TierCacheWrite1h: {Input: 40000},
+			},
 		}},
 	},
 	{
-		// ¥2 / ¥8 / ¥28 每百万 token。缓存命中当前限时免费，这里按原价 ¥2 填。
-		ID: "glm-5.2", Surface: SurfaceChat, Owner: "zhipu",
-		CtxLimit: 1_000_000,
+		// ¥2 / ¥8 / ¥28 每百万 token。限时免费的是缓存存储，非缓存命中。
+		// https://docs.bigmodel.cn/cn/guide/start/pricing
+		ID: "glm-5.3", Surface: SurfaceChat, Owner: "zhipu",
+		CtxLimit: 1_000_000, MaxOutput: 128_000,
 		Providers: []Provider{{
-			Name: "zhipu", UpstreamID: "glm-5.2",
+			Name: "zhipu", UpstreamID: "glm-5.3",
 			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
 			Pricing: map[string]Pricing{"": {InputHit: 2000, Input: 8000, Output: 28000}},
+		}},
+	},
+	{
+		// ¥0.23 / ¥0.8 / ¥2.8 每百万 token。
+		ID: "glm-5.3-flash", Surface: SurfaceChat, Owner: "zhipu",
+		CtxLimit: 1_000_000, MaxOutput: 128_000,
+		Providers: []Provider{{
+			Name: "zhipu", UpstreamID: "glm-5.3-flash",
+			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
+			Pricing: map[string]Pricing{TierDefault: {InputHit: 230, Input: 800, Output: 2800}},
+		}},
+	},
+	{
+		// ¥0.57 / ¥2 / ¥7 每百万 token。
+		ID: "glm-5.3-flashx", Surface: SurfaceChat, Owner: "zhipu",
+		CtxLimit: 1_000_000, MaxOutput: 128_000,
+		Providers: []Provider{{
+			Name: "zhipu", UpstreamID: "glm-5.3-flashx",
+			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
+			Pricing: map[string]Pricing{TierDefault: {InputHit: 570, Input: 2000, Output: 7000}},
 		}},
 	},
 	{

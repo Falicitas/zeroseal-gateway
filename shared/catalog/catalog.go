@@ -41,6 +41,10 @@ type Pricing struct {
 const (
 	TierDefault = ""
 
+	// Kimi K3 缓存写入，按有效期计价；用 Input 记录写入 token。
+	TierCacheWrite5m = "cache-write-5m"
+	TierCacheWrite1h = "cache-write-1h"
+
 	// seedream 图像：单价按「场景 × 像素档」四种组合，261 万像素为界
 	// （火山文档的说法是「分辨率 1.5K 及以下 / 以上」）。
 	// 输入图单价放在 TierDefault 上。
@@ -80,14 +84,34 @@ type TierAtTimeFunc func(at time.Time) string
 // 时区不保证是 Asia/Shanghai（没有确认），拿本地时区算会整体偏 8 小时
 var beijingTimeZone = time.FixedZone("UTC+8", 8*60*60)
 
-// tierAtByDeepseek 算 at 那一刻的分时档。高峰是北京时间 9:00–12:00、14:00–18:00，
-// 其余为空闲。边界左闭右开：9:00:00 算高峰，12:00:00 算空闲。
+// tierAtByDeepseek 高峰仅限北京时间周一至周五，节假日除外。
+// 边界左闭右开：9:00:00 算高峰，12:00:00 算空闲。周末调休上班仍算空闲。
 func tierAtByDeepseek(at time.Time) string {
-	h := at.In(beijingTimeZone).Hour()
+	at = at.In(beijingTimeZone)
+	if at.Weekday() == time.Saturday || at.Weekday() == time.Sunday || deepseekHoliday(at) {
+		return TierOffPeak
+	}
+	h := at.Hour()
 	if (h >= 9 && h < 12) || (h >= 14 && h < 18) {
 		return TierPeak
 	}
 	return TierOffPeak
+}
+
+// 2026 年国务院公布的放假日期。每年公布新安排后需补充下一年的日期。
+// https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm
+func deepseekHoliday(at time.Time) bool {
+	if at.Year() != 2026 {
+		return false
+	}
+	day := int(at.Month())*100 + at.Day()
+	return (day >= 101 && day <= 103) ||
+		(day >= 215 && day <= 223) ||
+		(day >= 404 && day <= 406) ||
+		(day >= 501 && day <= 505) ||
+		(day >= 619 && day <= 621) ||
+		(day >= 925 && day <= 927) ||
+		(day >= 1001 && day <= 1007)
 }
 
 // Usage 之所以是切片而不是单条：同一次请求的产物可能落在不同档位，各算各的量，故分 TierUsage。
@@ -124,7 +148,7 @@ type Provider struct {
 	BaseURL string
 
 	// Pricing 按档位索引，"" 是默认档。分档的情形：视频按分辨率、
-	// 图像按像素、部分文本模型按输入长度。当前六个 chat 模型都是单档。
+	// 图像按像素、chat 按时段或缓存写入有效期。
 	Pricing map[string]Pricing
 
 	// TierAt 算分时档，nil 表示这家不分时。写死一家的时段表会让别家填了
