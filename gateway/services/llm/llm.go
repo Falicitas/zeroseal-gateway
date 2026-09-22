@@ -104,7 +104,11 @@ func Forward(ctx context.Context, a Adapter, p catalog.Provider, key string, bod
 	if err != nil {
 		return nil, err
 	}
-	return readAll(httpClient, req)
+	resp, err := readAll(httpClient, req)
+	if err == nil && (resp.Status < 200 || resp.Status >= 300) {
+		resp.Status, resp.Body = rewriteUpstreamError(p.Name, resp.Status, resp.Body)
+	}
+	return resp, err
 }
 
 // ForwardImage 把图像生成请求转到上游。seedream 是同步接口，一次往返拿到结果，
@@ -156,7 +160,8 @@ func ForwardStream(
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errBody, _ := io.ReadAll(resp.Body)
 		diag.RecordUpstream(req.URL.Host, resp.StatusCode, "")
-		return nil, &UpstreamError{Status: resp.StatusCode, Body: errBody}
+		status, errBody := rewriteUpstreamError(p.Name, resp.StatusCode, errBody)
+		return nil, &UpstreamError{Status: status, Body: errBody}
 	}
 
 	result := &StreamResult{}

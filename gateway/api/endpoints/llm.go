@@ -298,11 +298,7 @@ func (h *LLM) nonStreamCompletion(c echo.Context, cl call) error {
 }
 
 func (h *LLM) streamCompletion(c echo.Context, cl call) error {
-	// SSE 响应头
 	resp := c.Response()
-	resp.Header().Set("Content-Type", "text/event-stream")
-	resp.Header().Set("Cache-Control", "no-cache")
-	resp.Header().Set("Connection", "keep-alive")
 
 	// 只在这条流式响应上解除写超时
 	rc := http.NewResponseController(resp.Writer)
@@ -311,11 +307,20 @@ func (h *LLM) streamCompletion(c echo.Context, cl call) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "无法配置流式响应")
 	}
 
-	resp.WriteHeader(http.StatusOK)
+	// 首次写入上游数据时才提交 200，建流失败仍能返回正确的 HTTP 错误码。
+	resp.Header().Set("Content-Type", "text/event-stream")
+	resp.Header().Set("Cache-Control", "no-cache")
+	resp.Header().Set("Connection", "keep-alive")
 
 	// 读上游用独立 ctx：客户端断连也读完，拿 usage 结算
 	readCtx := context.Background()
 	result, ferr := llm.ForwardStream(readCtx, cl.adapter, cl.provider, cl.key, cl.body, resp.Writer, resp.Flush)
+	if result == nil {
+		// 建流失败改回普通 HTTP 响应；Echo 不会覆盖已经设置的 Content-Type。
+		resp.Header().Del("Content-Type")
+		resp.Header().Del("Cache-Control")
+		resp.Header().Del("Connection")
+	}
 
 	// 计费收尾。用独立 ctx，不受客户端断连影响。
 	settleCtx := context.Background()
@@ -323,25 +328,18 @@ func (h *LLM) streamCompletion(c echo.Context, cl call) error {
 	var upErr *llm.UpstreamError
 	switch {
 	case errors.As(ferr, &upErr):
-		// 上游非 2xx：200 头已发，没法改状态码，把上游错误体透传进流里，
-		// 让客户端知道出错（SSE 惯例：错误走流内 event）。然后退款。
-		_, _ = resp.Writer.Write([]byte("data: " + string(upErr.Body) + "\n\n"))
-		resp.Flush()
+		// 上游尚未建流，下游也未提交响应，可以返回 JSON 和实际错误状态。
 		_ = billing.Refund(settleCtx, h.pool, cl.recordID)
 		c.Logger().Errorf("stream upstream %d, refunded %s", upErr.Status, cl.recordID)
-		return nil
+		return c.Blob(upErr.Status, "application/json", upErr.Body)
 
 	case result == nil:
 		// 上游根本没连上（DNS / TCP / 超时），ForwardStream 在建流之前就返错，
 		// result 是 nil。这里不判空的话下面几个分支会直接 panic，而 panic 之后
 		// 预扣既不结算也不退款，用户余额被永久锁住。
-		//
-		// 200 头已经发出去了，只能把错误塞进流里，然后全退。
-		_, _ = resp.Writer.Write([]byte("data: {\"error\":\"upstream unreachable\"}\n\n"))
-		resp.Flush()
 		_ = billing.Refund(settleCtx, h.pool, cl.recordID)
 		c.Logger().Errorf("stream 上游不可达，已退款 %s: %v", cl.recordID, ferr)
-		return nil
+		return echo.NewHTTPError(http.StatusBadGateway, upstreamUnreachable).SetInternal(ferr)
 
 	case ferr != nil && len(result.Usage) == 0:
 		// 上游流中途断、且没扫到 usage → 按预扣全额扣（暂定，不退）。

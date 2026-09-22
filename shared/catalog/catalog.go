@@ -209,7 +209,11 @@ func All() []Model {
 }
 
 // Lookup 按 ID 查找，第二个返回值表示是否存在。
+// 旧 Flash 名称仅作调用兼容，返回新模型及其定价，不加入 All 的模型列表。
 func Lookup(id string) (Model, bool) {
+	if id == "deepseek-v4-flash" {
+		id = "deepseek-flash"
+	}
 	for _, m := range models {
 		if m.ID == id {
 			return m, true
