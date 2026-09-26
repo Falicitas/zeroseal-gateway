@@ -1,16 +1,19 @@
 package endpoints
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/zeroseal/gateway/services/auth"
 	"github.com/zeroseal/gateway/services/billing"
 	"github.com/zeroseal/gateway/services/llm"
@@ -45,6 +48,11 @@ func NewLLM(providerKeys map[string]string, pool *pgxpool.Pool) *LLM {
 // /chat/completions 通过第三个变长参数单独挂鉴权，只作用于这条路由。
 func (h *LLM) Register(g *echo.Group) {
 	g.GET("/models", h.listModels)
+	catalogGroup := g.Group("/catalog", middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: panelOrigins,
+		AllowMethods: []string{http.MethodGet},
+	}))
+	catalogGroup.GET("/models", h.listCatalogModels)
 	g.POST("/chat/completions", h.chatCompletions, h.requireAuth)
 	g.POST("/images/generations", h.imageGenerations, h.requireAuth)
 	g.POST("/audio/speech", h.audioSpeech, h.requireAuth)
@@ -81,6 +89,32 @@ type modelObject struct {
 type modelList struct {
 	Object string        `json:"object"`
 	Data   []modelObject `json:"data"`
+}
+
+// 公开目录 DTO 是响应 schema，不是每个模型各自的一份配置：新增模型只改
+// shared/catalog/models.go，listCatalogModels 会自动遍历 catalog.All()。
+// 字段保持显式白名单，避免直接序列化 catalog.Provider，把 BaseURL、UpstreamID
+// 等内部路由信息暴露给浏览器。
+type catalogPrice struct {
+	Tier     string `json:"tier"`
+	InputHit int64  `json:"input_hit"`
+	Input    int64  `json:"input"`
+	Output   int64  `json:"output"`
+}
+
+type catalogModel struct {
+	ID        string          `json:"id"`
+	Surface   catalog.Surface `json:"surface"`
+	Owner     string          `json:"owner"`
+	Created   int64           `json:"created"`
+	CtxLimit  int64           `json:"ctx_limit"`
+	MaxOutput int64           `json:"max_output"`
+	Prices    []catalogPrice  `json:"prices"`
+}
+
+type catalogModelList struct {
+	Object string         `json:"object"`
+	Data   []catalogModel `json:"data"`
 }
 
 func accountFrom(c echo.Context) (auth.Account, bool) {
@@ -126,6 +160,62 @@ func (h *LLM) listModels(c echo.Context) error {
 		})
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// listCatalogModels 返回给 panel 展示用的公开目录。一个模型可能接入多个
+// provider；相同 tier 和价格只保留一条，但不同 tier 始终分别展示。
+// 只有公开目录需要新的字段时，才在 DTO 这里同步扩展；模型增删不需要改这里。
+func (h *LLM) listCatalogModels(c echo.Context) error {
+	entries := catalog.All()
+	out := catalogModelList{
+		Object: "catalog",
+		Data:   make([]catalogModel, 0, len(entries)),
+	}
+	for _, m := range entries {
+		out.Data = append(out.Data, catalogModel{
+			ID:        m.ID,
+			Surface:   m.Surface,
+			Owner:     m.Owner,
+			Created:   m.Created,
+			CtxLimit:  m.CtxLimit,
+			MaxOutput: m.MaxOutput,
+			Prices:    publicPrices(m),
+		})
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+func publicPrices(m catalog.Model) []catalogPrice {
+	prices := make([]catalogPrice, 0)
+	seen := make(map[catalogPrice]struct{})
+	for _, p := range m.Providers {
+		for tier, price := range p.Pricing {
+			item := catalogPrice{
+				Tier:     tier,
+				InputHit: price.InputHit,
+				Input:    price.Input,
+				Output:   price.Output,
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			prices = append(prices, item)
+		}
+	}
+	slices.SortFunc(prices, func(a, b catalogPrice) int {
+		if a.Tier != b.Tier {
+			return strings.Compare(a.Tier, b.Tier)
+		}
+		if a.InputHit != b.InputHit {
+			return cmp.Compare(a.InputHit, b.InputHit)
+		}
+		if a.Input != b.Input {
+			return cmp.Compare(a.Input, b.Input)
+		}
+		return cmp.Compare(a.Output, b.Output)
+	})
+	return prices
 }
 func (h *LLM) chatCompletions(c echo.Context) error {
 	acc, ok := accountFrom(c)
