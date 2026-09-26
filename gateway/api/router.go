@@ -5,6 +5,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/zeroseal/gateway/api/endpoints"
 	"github.com/zeroseal/gateway/services/attestation"
 	"github.com/zeroseal/gateway/services/diag"
@@ -32,6 +33,14 @@ func NewRouter(providerKeys map[string]string, pool *pgxpool.Pool, col *attestat
 	e.Use(diag.Recover())
 
 	v1 := e.Group("/v1")
+	// 仅检查 HTTP 服务存活，不调用模型或生成 TEE quote。
+	v1.GET("/health", func(c echo.Context) error {
+		c.Response().Header().Set("Cache-Control", "no-store")
+		return c.JSON(http.StatusOK, map[string]string{"service": "gateway", "status": "ok"})
+	}, middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"https://zeroseal.cn", "https://zeroseal.cc"},
+		AllowMethods: []string{http.MethodGet},
+	}))
 
 	endpoints.NewLLM(providerKeys, pool).Register(v1)
 	endpoints.NewAttestation(col).Register(v1)

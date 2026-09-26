@@ -31,7 +31,8 @@ func NewAttestation(col *attestation.Collateral) *Attestation {
 // 验证能力锁在付费墙后面等于自断卖点——潜在客户、白帽、第三方尽调
 // 都需要在不持有 api key 的前提下能验。
 //
-// CORS 只开给公开的浏览器 GET 端点。/v1/chat/completions 不开。
+
+// CORS 只开给公开的浏览器 GET 端点。健康接口单独配置。/v1/chat/completions 不开。
 // 挂在路由上而非整组，是因为这些请求只读公开数据，浏览器不需要发送预检。
 // TODO: 以后若给这个端点加自定义请求头，就得改挂到组上，否则预检会走不到中间件。
 func (h *Attestation) Register(g *echo.Group) {
